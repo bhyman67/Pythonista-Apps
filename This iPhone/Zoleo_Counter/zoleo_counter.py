@@ -10,6 +10,7 @@ Data is saved to a JSON file after every tap, so nothing is lost between runs.
 Usage:
   - Tap "+1" on a thread row each time you send that person a satellite message.
   - Tap "+1" on the Weather row each time you check the weather.
+    - Tap "+1" on the Check-In row each time you send a satellite Check-In.
   - "-1" undoes an accidental tap.
   - "+ Add Thread" creates a named conversation thread (e.g. 'Wife', 'Dad').
   - Long-press a thread name to delete that thread.
@@ -18,26 +19,47 @@ Usage:
   - "Reset" (with confirmation) zeroes everything at any time.
 """
 
-import ui
 import os
+import sys
 import json
-import console
+from pathlib import Path
 from datetime import date, timedelta
+
+try:
+    import ui
+    import console
+except ModuleNotFoundError as error:
+    if error.name not in ('ui', 'console'):
+        raise
+    shim_dir = next(
+        (parent for parent in Path(__file__).resolve().parents
+         if (parent / 'ui.py').is_file() and (parent / 'console.py').is_file()),
+        None,
+    )
+    if shim_dir is None:
+        raise
+    sys.path.insert(0, str(shim_dir))
+    import ui
+    import console
 
 # --- Settings ---
 MONTHLY_LIMIT = 50
 
-# Store data in Pythonista's own documents folder (always writable).
-# Writing next to the script fails if it was opened as an external file
-# (e.g. from OneDrive), because iOS only grants access to that one file.
-try:
-    DOCS_DIR = os.path.expanduser('~/Documents')
-    if not os.path.isdir(DOCS_DIR):
-        raise OSError('Documents folder not found')
-except Exception:
-    DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Store data next to the script itself. The script now lives in
+# Pythonista's own documents (not opened as an external file), so its
+# folder is always writable.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(SCRIPT_DIR, 'zoleo_count.json')
 
-DATA_FILE = os.path.join(DOCS_DIR, 'zoleo_count.json')
+# One-time migration: if data exists in the old Documents location but not
+# next to the script yet, move it over so no counts are lost.
+OLD_DATA_FILE = os.path.join(os.path.expanduser('~/Documents'), 'zoleo_count.json')
+try:
+    if not os.path.exists(DATA_FILE) and os.path.exists(OLD_DATA_FILE) \
+            and os.path.abspath(OLD_DATA_FILE) != DATA_FILE:
+        os.replace(OLD_DATA_FILE, DATA_FILE)
+except Exception:
+    pass
 
 # --- Colors ---
 BG_COLOR = '#1c1c1e'
@@ -51,7 +73,13 @@ SUBTLE = '#aaaaaa'
 
 
 def default_data():
-    return {'weather': 0, 'threads': {}, 'billing_day': None, 'period_start': None}
+    return {
+        'weather': 0,
+        'check_ins': 0,
+        'threads': {},
+        'billing_day': None,
+        'period_start': None,
+    }
 
 
 def load_data():
@@ -66,6 +94,7 @@ def load_data():
             if old > 0:
                 data['threads']['Satellite Messages'] = old
         data.setdefault('weather', 0)
+        data.setdefault('check_ins', 0)
         data.setdefault('threads', {})
     except Exception:
         data = default_data()
@@ -126,10 +155,11 @@ class ThreadRow(ui.View):
     PAD = 12
     BTN_W = 46
 
-    def __init__(self, app, key, is_weather=False):
+    def __init__(self, app, key, is_weather=False, is_checkin=False):
         self.app = app
         self.key = key
         self.is_weather = is_weather
+        self.is_checkin = is_checkin
         self.background_color = ROW_COLOR
         self.corner_radius = 10
 
@@ -168,7 +198,7 @@ class ThreadRow(ui.View):
         self.add_subview(self.plus_button)
 
         # Long-press the name to delete a thread (weather row can't be deleted)
-        if not is_weather:
+        if not is_weather and not is_checkin:
             try:
                 self.name_label.user_interaction_enabled = True
                 self.name_label.add_recognizer(
@@ -181,10 +211,17 @@ class ThreadRow(ui.View):
     def get_count(self):
         if self.is_weather:
             return self.app.data['weather']
+        if self.is_checkin:
+            return self.app.data['check_ins']
         return self.app.data['threads'].get(self.key, 0)
 
     def refresh(self):
-        label = '\U0001F324 Weather Checks' if self.is_weather else self.key
+        if self.is_weather:
+            label = '\U0001F324 Weather Checks'
+        elif self.is_checkin:
+            label = 'Check-In Messages'
+        else:
+            label = self.key
         self.name_label.text = label
         self.count_label.text = str(self.get_count())
 
@@ -202,6 +239,8 @@ class ThreadRow(ui.View):
     def increment(self, sender):
         if self.is_weather:
             self.app.data['weather'] += 1
+        elif self.is_checkin:
+            self.app.data['check_ins'] += 1
         else:
             self.app.data['threads'][self.key] = \
                 self.app.data['threads'].get(self.key, 0) + 1
@@ -211,6 +250,9 @@ class ThreadRow(ui.View):
         if self.is_weather:
             if self.app.data['weather'] > 0:
                 self.app.data['weather'] -= 1
+        elif self.is_checkin:
+            if self.app.data['check_ins'] > 0:
+                self.app.data['check_ins'] -= 1
         else:
             cur = self.app.data['threads'].get(self.key, 0)
             if cur > 0:
@@ -358,7 +400,11 @@ class ZoleoCounter(ui.View):
     # --- Data / display ---
 
     def total(self):
-        return self.data['weather'] + sum(self.data['threads'].values())
+        return (
+            self.data['weather']
+            + self.data['check_ins']
+            + sum(self.data['threads'].values())
+        )
 
     def usage_color(self):
         ratio = self.total() / MONTHLY_LIMIT
@@ -401,6 +447,7 @@ class ZoleoCounter(ui.View):
             except Exception:
                 pass
         self.rows = [ThreadRow(self, 'weather', is_weather=True)]
+        self.rows.append(ThreadRow(self, 'check_ins', is_checkin=True))
         for name in sorted(self.data['threads'].keys()):
             self.rows.append(ThreadRow(self, name))
         for row in self.rows:
