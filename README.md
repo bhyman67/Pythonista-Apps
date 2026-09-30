@@ -32,6 +32,6 @@ The shims provide only the Pythonista APIs currently needed by the app; desktop 
 
 ## Updating on a Device
 
-`update_pythonista_app.py` is a general-purpose updater. In the repository it is at the root; copy it to the root of Pythonista's `This iPhone` folder to run it on the device. Set `RAW_BASE_URL` in the script to the GitHub raw-content folder containing the app scripts.
+`sync_pythonista_apps.py` discovers app folders in the matching GitHub device folder. Copy it to the root of Pythonista's `This iPhone` or `This iPad` folder. It detects the device through UIKit, creates missing app folders after a successful script download, and maps each folder to a lowercase script filename, so `Zoleo_Counter` maps to `zoleo_counter.py`.
 
-The updater asks for the app folder name, then downloads only the corresponding `.py` file. For example, `Zoleo_Counter` maps to `zoleo_counter.py`. It does not download or replace JSON data, screenshots, or other assets, so those remain untouched by script updates.
+The script downloads each app's `.py` file from the matching device folder, validates the source, then replaces that script. JSON data, screenshots, and other assets are never downloaded or changed. Failed downloads are reported after the other apps have been attempted. Update `GITHUB_REPOSITORY` or `BRANCH` if the repository or branch changes. This updater runs in Pythonista and uses its `objc_util` module for device detection and the GitHub Contents API for app discovery.
